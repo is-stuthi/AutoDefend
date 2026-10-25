@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+import numpy as np
+
 from src.agents.base import DetectorAgent, DetectorResult
 from src.data.schema import NORMAL_LABEL
 from src.features.schema import WindowFeatures
@@ -22,14 +26,24 @@ class MLAgent(DetectorAgent):
         self._model = model
 
     def analyze(self, features: WindowFeatures) -> DetectorResult:
-        probabilities = self._model.predict_proba(features.to_array().reshape(1, -1))[0]
+        return self.analyze_batch([features])[0]
+
+    def analyze_batch(self, features: Sequence[WindowFeatures]) -> list[DetectorResult]:
+        """Score many windows with a single ``predict_proba`` call.
+
+        Produces the same results as calling ``analyze`` once per window,
+        without the per-call overhead of the forest.
+        """
+        if not features:
+            return []
+        probabilities = self._model.predict_proba(np.vstack([f.to_array() for f in features]))
         classes = list(self._model.classes_)
+        normal_index = classes.index(NORMAL_LABEL) if NORMAL_LABEL in classes else None
 
-        normal_probability = probabilities[classes.index(NORMAL_LABEL)] if NORMAL_LABEL in classes else 0.0
-        confidence = float(1.0 - normal_probability)
-        predicted_label = classes[int(probabilities.argmax())]
-
-        details: dict[str, float | str] = {"predicted_label": predicted_label}
-        details.update({f"proba_{cls}": float(prob) for cls, prob in zip(classes, probabilities)})
-
-        return DetectorResult(detector_name=self.name, confidence=confidence, details=details)
+        results: list[DetectorResult] = []
+        for row in probabilities:
+            normal_probability = row[normal_index] if normal_index is not None else 0.0
+            details: dict[str, float | str] = {"predicted_label": classes[int(row.argmax())]}
+            details.update({f"proba_{cls}": float(prob) for cls, prob in zip(classes, row)})
+            results.append(DetectorResult(detector_name=self.name, confidence=float(1.0 - normal_probability), details=details))
+        return results

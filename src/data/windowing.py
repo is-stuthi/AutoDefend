@@ -7,7 +7,7 @@ rather than a time-based one).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import pandas as pd
 
@@ -72,3 +72,25 @@ def label_window(labels: pd.Series) -> str:
 def window_label(window: pd.DataFrame) -> str:
     """Convenience wrapper to derive a window's label from its DataFrame slice."""
     return label_window(window[LABEL_COLUMN])
+
+
+def iter_segment_windows(
+    df: pd.DataFrame,
+    segments: Sequence[tuple[int, int]],
+    window_size: int,
+    stride: int,
+) -> Iterator[tuple[int, pd.DataFrame]]:
+    """Yield ``(global_start_row, window)`` for windows drawn inside each segment.
+
+    Windows never cross a segment boundary, so windows from different
+    segments (e.g. train vs. test) can never share a frame.
+
+    Args:
+        df: Preprocessed dataset, in original row order.
+        segments: Half-open ``(start, end)`` row ranges.
+        window_size: Number of consecutive messages per window.
+        stride: Number of rows to advance between windows.
+    """
+    for seg_start, seg_end in segments:
+        for local_start, local_end in iter_window_bounds(seg_end - seg_start, window_size, stride):
+            yield seg_start + local_start, df.iloc[seg_start + local_start : seg_start + local_end]

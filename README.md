@@ -150,9 +150,10 @@ python main.py
 ```
 
 This loads and validates the dataset, builds sliding windows, extracts
-features, trains and saves the Random Forest, runs all four detection
-agents through the fusion engine, and writes evaluation results to
-`artifacts/`.
+features, splits train/test with the burst-aware blocked split, calibrates the rule
+thresholds on training windows, trains and saves the Random Forest, runs the
+RF-only / rules-only / fusion ablation on the held-out windows, and writes
+results to `artifacts/`.
 
 Key options:
 
@@ -177,31 +178,99 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-### Results (default configuration)
+## Evaluation methodology
 
-On the full ~818K-row dataset (100-message windows, 50-message stride,
-16,367 windows total, 80/20 train/test split):
+**Setup.** 818,440 CAN frames; windows of **100 frames, stride 50**; **11 features** per window
+(5 frequency, 2 entropy, 4 payload-statistics); window label = most frequent attack label in the
+window, or `R` if none. Random Forest: 200 trees, `random_state=42`, sklearn defaults otherwise.
 
-**Random Forest (multi-class: R / DoS / Fuzzy / Gear / RPM)**
+**Why not a random split over windows?** With stride 50 and size 100, consecutive windows share
+half their frames, so a random window split puts the same frames in both train and test. The
+original evaluation did exactly that (the legacy run below shares 262,600 frames between train
+and test). It is kept only as a clearly labeled LEAKY comparison
+(`--include-legacy-comparison`).
 
-| Metric | Value |
+**Burst-aware blocked split (primary)** - `src/data/split.py`:
+
+1. Find *bursts*: runs of attack frames separated by fewer than 100 consecutive normal frames. The
+   data contains exactly 1,200 bursts (300 per attack type).
+2. Group consecutive bursts of the same label into attack regions; the traffic between them forms
+   normal regions.
+3. In every region the chronologically **last 20%** is test (for attack regions: the last 60 of 300
+   bursts; the cut falls in the all-normal gap between two bursts and that gap is dropped).
+4. Windows are generated **inside** each train/test segment after the split, so no window crosses
+   the boundary.
+
+Nothing is shuffled and no timestamps are invented (the dataset has none; row order is the only
+time axis). Verified on the real run: 13,081 train / 3,220 test windows, **0 shared frames**,
+**0 bursts touched by both sides** (960 train / 240 test), nearest train/test frames are 104 frames
+apart.
+
+**Rule calibration** - `src/agents/calibration.py`: after the split, each rule detector's ramp
+endpoints are the 99th and 99.9th percentile (for "high is suspicious" features) or the 1st and
+0.1st percentile (for "low is suspicious" features) of the **normal training windows only**.
+Attack labels and test data are never used; it is deterministic. The thresholds used are saved to
+`artifacts/results/calibrated_thresholds.json`. The detectors' constructor defaults are the old
+hand-set values and are used only in unit tests.
+
+**Ablation** - `src/evaluation/ablation.py`, same test windows for every method, attack = positive class:
+
+| Method | Decision rule |
 |---|---|
-| Accuracy | 0.931 |
-| Macro Precision | 0.951 |
-| Macro Recall | 0.905 |
-| Macro F1 | 0.926 |
+| RF-only | RF 5-class prediction; any non-`R` class = attack |
+| Rules-only | frequency + entropy + statistical agents through the same `FusionEngine` (weights renormalized to 0.364 / 0.364 / 0.273, no ML agent); attack if fused score >= 20 |
+| Fusion | all four agents, default weights (0.20 / 0.20 / 0.15 / 0.45); attack if fused score >= 20 |
 
-**Fusion Engine (binary: Normal vs. Attack)**
+No weight or threshold was tuned on the test set; fusion weights and the score threshold are the
+original hand-set defaults.
 
-| Metric | Value |
-|---|---|
-| Accuracy | 0.939 |
-| Precision | 0.940 |
-| Recall | 0.941 |
-| F1 | 0.939 |
+## Results
 
-Full classification reports, confusion matrices (PNG), and feature
-importances are written to `artifacts/results/` on every run.
+All numbers below come from `python main.py --include-legacy-comparison` on the full dataset
+(`artifacts/results/evaluation_report.json`).
+
+**Primary (leakage-safe blocked split), 3,220 test windows** (R 1543, DoS 332, Fuzzy 306, Gear 496, RPM 543):
+
+| Method | Accuracy | Precision | Recall | F1 | FPR | FNR |
+|---|---|---|---|---|---|---|
+| RF-only | 0.9460 | 0.9808 | 0.9141 | 0.9463 | 0.0194 | 0.0859 |
+| Rules-only | 0.9332 | 0.9747 | 0.8951 | 0.9332 | 0.0253 | 0.1049 |
+| Fusion | 0.9401 | 0.9502 | 0.9338 | 0.9420 | 0.0531 | 0.0662 |
+
+RF 5-class on the same test windows: accuracy 0.9317, macro precision 0.9468, macro recall
+0.9098, macro F1 0.9269 (per-class recall: DoS 0.89, Fuzzy 0.94, Gear 0.83, R 0.98, RPM 0.90).
+
+**Reading the ablation honestly.** Fusion does *not* beat RF-only on accuracy or F1 (0.9401 vs 0.9460
+accuracy, 0.9420 vs 0.9463 F1). It trades precision for recall: it catches more attacks (FNR 6.6%
+vs 8.6%) at the cost of more than 2.7x the false-positive rate (5.3% vs 1.9%). Whether that is
+a good trade depends on the cost of a missed attack versus a false alarm, and it is a consequence of
+the untuned score threshold of 20. The rules alone, with thresholds calibrated on normal training
+data and no ML, reach F1 0.933.
+
+**Legacy random split (LEAKY - do not cite)**, 3,274 test windows, same code and calibration:
+RF 5-class accuracy 0.9297; binary accuracy / F1 - RF-only 0.9426 / 0.9424, rules-only 0.9227 / 0.9222,
+fusion 0.9356 / 0.9364.
+
+**Old vs. new.** The headline numbers barely move (RF 5-class 0.930 vs 0.932; the originally
+reported 0.931 / 0.939 came from hand-set thresholds, which this repo no longer uses). So
+frame-sharing leakage was *not* what drove the ~93% figure for this feature set: bursts within a
+recording look statistically alike, so a model trained on early bursts transfers to later bursts in
+the same recording. What changed is that the number is now defensible: no shared frames, no shared
+bursts, thresholds fitted on training data only, and a baseline comparison.
+
+## Limitations
+
+- The dataset has one recording per attack type, so the split measures generalization to unseen
+  bursts later in the same recording, not to unseen attack campaigns, vehicles or attack parameters.
+- Evaluation is window-level (any attack frame labels the window), not frame-level, so it is not
+  comparable to frame-level numbers in the literature.
+- Test windows overlap each other (stride 50), so the 3,220 test windows are not independent samples;
+  there is no confidence interval or repeated-run variance estimate yet.
+- Fusion weights and the score threshold are hand-set, not learned or tuned; the threshold of 20 makes
+  fusion trade a higher false-positive rate for recall.
+- Batch evaluation only. This is not a real-time or streaming detector, and detection latency
+  was not measured. The "agents" are rule-based detector modules, not autonomous agents.
+- Random Forest hyperparameters are untuned defaults.
 
 ## Future Improvements
 

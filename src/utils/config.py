@@ -35,8 +35,47 @@ class RandomForestConfig:
     n_estimators: int = 200
     max_depth: int | None = None
     random_state: int = 42
-    test_size: float = 0.2
     n_jobs: int = -1
+
+
+@dataclass(frozen=True)
+class SplitConfig:
+    """Train/test split settings.
+
+    ``blocked`` is the primary, leakage-safe burst-aware split (see
+    ``src/data/split.py``). ``random_legacy`` is the original random split
+    over overlapping windows; it LEAKS frames between train and test and
+    exists only to quantify how optimistic it was.
+    """
+
+    strategy: str = "blocked"
+    test_fraction: float = 0.2
+    random_state: int = 42
+    include_legacy_comparison: bool = False
+
+    def __post_init__(self) -> None:
+        if self.strategy not in ("blocked", "random_legacy"):
+            raise ValueError("split strategy must be 'blocked' or 'random_legacy'")
+        if not 0.0 < self.test_fraction < 1.0:
+            raise ValueError("test_fraction must be in (0, 1)")
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """Rule-threshold calibration, computed from normal TRAINING windows only.
+
+    For each rule feature, a detector's confidence ramps from 0 at the
+    ``ramp_start_tail`` quantile of normal-training values (e.g. the 99th
+    percentile for "high is suspicious") to 1 at the ``ramp_end_tail``
+    quantile (the 99.9th). Lower-tail features use the mirrored quantiles.
+    """
+
+    ramp_start_tail: float = 0.01
+    ramp_end_tail: float = 0.001
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.ramp_end_tail < self.ramp_start_tail < 0.5:
+            raise ValueError("require 0 < ramp_end_tail < ramp_start_tail < 0.5")
 
 
 @dataclass(frozen=True)
@@ -93,6 +132,8 @@ class PipelineConfig:
     """Aggregate configuration for a single end-to-end pipeline run."""
 
     window: WindowConfig = field(default_factory=WindowConfig)
+    split: SplitConfig = field(default_factory=SplitConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     random_forest: RandomForestConfig = field(default_factory=RandomForestConfig)
     fusion_weights: FusionWeights = field(default_factory=FusionWeights)
     thresholds: ThreatThresholds = field(default_factory=ThreatThresholds)

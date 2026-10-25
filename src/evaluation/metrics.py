@@ -74,3 +74,74 @@ def evaluate_predictions(
         class_labels=resolved_labels,
         classification_report=report_text,
     )
+
+
+@dataclass(frozen=True)
+class BinaryMetrics:
+    """Binary intrusion-detection metrics with ``attack`` as the positive class."""
+
+    accuracy: float
+    precision: float
+    recall: float
+    f1_score: float
+    false_positive_rate: float
+    false_negative_rate: float
+    normal_recall: float
+    tn: int
+    fp: int
+    fn: int
+    tp: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accuracy": self.accuracy,
+            "precision": self.precision,
+            "recall": self.recall,
+            "f1_score": self.f1_score,
+            "false_positive_rate": self.false_positive_rate,
+            "false_negative_rate": self.false_negative_rate,
+            "normal_recall": self.normal_recall,
+            "confusion_matrix": [[self.tn, self.fp], [self.fn, self.tp]],
+            "confusion_matrix_labels": ["normal", "attack"],
+        }
+
+    @property
+    def confusion_matrix(self) -> np.ndarray:
+        return np.array([[self.tn, self.fp], [self.fn, self.tp]])
+
+
+def binary_metrics(y_true_is_attack: Sequence[bool], y_pred_is_attack: Sequence[bool]) -> BinaryMetrics:
+    """Compute attack-positive binary metrics, including FPR and FNR.
+
+    Precision/recall/F1 are for the *attack* class (not macro-averaged).
+    Rates with an empty denominator are reported as 0.0.
+    """
+    t = np.asarray(y_true_is_attack, dtype=bool)
+    p = np.asarray(y_pred_is_attack, dtype=bool)
+    if t.shape != p.shape:
+        raise ValueError("y_true and y_pred must have the same length")
+
+    tp = int(np.sum(t & p))
+    tn = int(np.sum(~t & ~p))
+    fp = int(np.sum(~t & p))
+    fn = int(np.sum(t & ~p))
+
+    def ratio(num: int, den: int) -> float:
+        return float(num / den) if den else 0.0
+
+    precision = ratio(tp, tp + fp)
+    recall = ratio(tp, tp + fn)
+    f1 = ratio(2 * precision * recall, precision + recall) if (precision + recall) else 0.0
+    return BinaryMetrics(
+        accuracy=ratio(tp + tn, t.size),
+        precision=precision,
+        recall=recall,
+        f1_score=f1,
+        false_positive_rate=ratio(fp, fp + tn),
+        false_negative_rate=ratio(fn, fn + tp),
+        normal_recall=ratio(tn, tn + fp),
+        tn=tn,
+        fp=fp,
+        fn=fn,
+        tp=tp,
+    )
